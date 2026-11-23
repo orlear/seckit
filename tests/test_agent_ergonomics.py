@@ -95,7 +95,8 @@ class McpTests(unittest.TestCase):
         self.assertEqual(replies[0]["error"]["code"], -32602)
         self.assertEqual(replies[1]["result"], {"resources": []})
         self.assertEqual([p["name"] for p in replies[2]["result"]["prompts"]],
-                         ["security_audit", "differential_review", "variant_analysis", "triage_findings"])
+                         ["security_audit", "differential_review", "variant_analysis", "triage_findings",
+                          "access_control_review", "agent_security_review", "secret_leak_response", "iac_review"])
 
 
 class InstallTests(unittest.TestCase):
