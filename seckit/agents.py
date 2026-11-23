@@ -18,10 +18,25 @@ from . import __version__, audit, fixes, playbooks, report as reporting, supply_
 
 _BLOCK_START = "<!-- seckit:managed:start -->"
 _BLOCK_END = "<!-- seckit:managed:end -->"
-_SKILL_HEADER = "---\nname: seckit\ndescription: Proactively inspect repository security during code changes and use SecKit to review findings and safe fixes.\n---"
-_AUDIT_HEADER = ("---\nname: seckit-audit\ndescription: Blue-team security code audit with SecKit: map the attack surface, scan code, "
-                 "dependencies and CI, review diffs, hunt variants with Semgrep, triage false positives, fix and report (Markdown/SARIF). "
-                 "Use for security audits, PR security reviews, vulnerability triage and hardening.\n---")
+_SKILL_HEADER = ("---\nname: seckit\ndescription: Scans the repository with SecKit for vulnerable code, dependencies with known CVEs, "
+                 "leaked secrets and misconfigurations, and applies reviewed safe fixes. Use when the user asks to check, scan or "
+                 "secure the project or to look for vulnerabilities, and proactively after changing dependencies, auth, input "
+                 "handling or deployment config, or before a commit or pull request.\n---")
+_AUDIT_HEADER = ("---\nname: seckit-audit\ndescription: Runs a full blue-team security code audit with SecKit. Maps the attack surface, "
+                 "scans code, dependencies and CI, reviews diffs, hunts variants with Semgrep, triages false positives, fixes and "
+                 "reports in Markdown or SARIF. Use for full security audits, PR or diff security reviews, vulnerability triage and "
+                 "hardening. Not for a quick vulnerability scan, which the seckit skill covers.\n---")
+# Headers written by earlier releases. The audit one is not valid YAML (": " in a
+# plain scalar), so strict parsers skipped the skill; install replaces them.
+_PREVIOUS_HEADERS = {
+    "seckit": ("---\nname: seckit\ndescription: Proactively inspect repository security during code changes and use SecKit to review "
+               "findings and safe fixes.\n---",),
+    "seckit-audit": ("---\nname: seckit-audit\ndescription: Blue-team security code audit with SecKit: map the attack surface, scan code, "
+                     "dependencies and CI, review diffs, hunt variants with Semgrep, triage false positives, fix and report (Markdown/SARIF). "
+                     "Use for security audits, PR security reviews, vulnerability triage and hardening.\n---",),
+}
+_SKILL_NAMES = ("seckit", "seckit-audit", *playbooks.SKILLS)
+_SKILL_FILES = tuple(f"{base}/skills/{name}/SKILL.md" for name in _SKILL_NAMES for base in (".agents", ".claude"))
 
 
 def command_status() -> dict[str, Any]:
@@ -66,7 +81,7 @@ Run `{command} scan --json` to inspect the repository. Review all findings and s
 
 `init`, `scan` and `doctor` return `next_steps`: ordered actions with the exact command and the project files each would write. After reporting results, offer the first two to four as a short numbered list and ask which to start; do not run a step that writes files unless the user's task covers it. If `{command}` is not found or its scanners are missing, ask the user to run `pipx install seckit` (or `uv tool install seckit`; the package is `seckit`, not `guardkit`) and `seckit init` in the project, then continue.
 
-For a full code audit or a change review, follow the `seckit-audit` skill: `{command} surface`, `supply-chain`, `diff --base REF`, `rule`, `triage` and `report`, or the matching MCP tools. For MCP, call `propose_safe_fixes`, show its sanitized diffs, then call `apply_safe_fixes` with that review_id only when the user's current task authorizes the displayed changes. Never execute repository scripts, tests, builds, or other project code as verification unless the user explicitly requested it.
+For a full code audit or a change review, follow the `seckit-audit` skill: `{command} surface`, `supply-chain`, `diff --base REF`, `rule`, `triage` and `report`, or the matching MCP tools. When a task is specifically about authentication and authorization, LLM features or agent configuration, a leaked credential, or infrastructure as code, use only the matching skill: `seckit-access-control`, `seckit-agent-security`, `seckit-secret-leak` or `seckit-iac-review`. For MCP, call `propose_safe_fixes`, show its sanitized diffs, then call `apply_safe_fixes` with that review_id only when the user's current task authorizes the displayed changes. Never execute repository scripts, tests, builds, or other project code as verification unless the user explicitly requested it.
 {_BLOCK_END}"""
 
 
@@ -74,10 +89,10 @@ def _skill(root: Path) -> str:
     return _SKILL_HEADER + "\n\n" + _instructions(root) + "\n"
 
 
-def _audit_instructions(root: Path) -> str:
+def _tools(root: Path) -> str:
     command = _invocation(root)
     base = f"{command} {{}}"
-    tools = "\n".join([
+    return "\n".join([
         "## Tools",
         "",
         "CLI (JSON output; exit 0 clean, 1 findings, 2 incomplete) and the equivalent MCP tool:",
@@ -91,11 +106,34 @@ def _audit_instructions(root: Path) -> str:
         f"- `{base.format('triage')} FINDING_ID --verdict true_positive --reason '...'` / `triage`: record a verdict in `.seckit/triage.json`.",
         f"- `{base.format('report')} --format markdown` (or `sarif --output seckit.sarif`) / `audit_report`: final report.",
     ])
-    return "\n\n".join([_BLOCK_START, tools, playbooks.AUDIT.strip(), playbooks.DIFF.strip(), playbooks.VARIANTS.strip(), playbooks.TRIAGE.strip(), _BLOCK_END])
+
+
+def _audit_instructions(root: Path) -> str:
+    return "\n\n".join([_BLOCK_START, _tools(root), playbooks.AUDIT.strip(), playbooks.DIFF.strip(), playbooks.VARIANTS.strip(), playbooks.TRIAGE.strip(), _BLOCK_END])
+
+
+def _skill_header(name: str) -> str:
+    if name == "seckit":
+        return _SKILL_HEADER
+    if name == "seckit-audit":
+        return _AUDIT_HEADER
+    return f"---\nname: {name}\ndescription: {playbooks.SKILLS[name][0]}\n---"
+
+
+def _skill_instructions(root: Path, name: str) -> str:
+    if name == "seckit":
+        return _instructions(root)
+    if name == "seckit-audit":
+        return _audit_instructions(root)
+    return "\n\n".join([_BLOCK_START, _tools(root), playbooks.SKILLS[name][1].strip(), _BLOCK_END])
+
+
+def _named_skill(root: Path, name: str) -> str:
+    return _skill_header(name) + "\n\n" + _skill_instructions(root, name) + "\n"
 
 
 def _audit_skill(root: Path) -> str:
-    return _AUDIT_HEADER + "\n\n" + _audit_instructions(root) + "\n"
+    return _named_skill(root, "seckit-audit")
 
 
 def _cursor_content(root: Path) -> str:
@@ -114,14 +152,17 @@ def _frontmatter(existing: str) -> tuple[int, str] | None:
     return closing + len(delimiter), newline
 
 
-def _skill_update(existing: str, root: Path, audit_skill: bool = False) -> str:
-    managed = _audit_instructions(root) if audit_skill else _instructions(root)
+def _skill_update(existing: str, root: Path, name: str = "seckit") -> str:
+    managed = _skill_instructions(root, name)
     header = _frontmatter(existing)
     if header is not None:
-        body_offset, _newline = header
-        body = existing[body_offset:]
-        return existing[:body_offset] + _replace_managed(body, managed)
-    header_text = (_AUDIT_HEADER if audit_skill else _SKILL_HEADER) + "\n\n"
+        body_offset, newline = header
+        head, body = existing[:body_offset], existing[body_offset:]
+        # Custom metadata stays; only a header an earlier release wrote is replaced.
+        if head.replace("\r\n", "\n").rstrip("\n") in _PREVIOUS_HEADERS.get(name, ()):
+            head = _skill_header(name).replace("\n", newline) + newline
+        return head + _replace_managed(body, managed)
+    header_text = _skill_header(name) + "\n\n"
     separator = "" if not existing or existing.endswith("\n") else "\n"
     return header_text + existing + separator + "\n" + managed + "\n"
 
@@ -217,10 +258,7 @@ def install(root: Path, plan: list[dict[str, Any]] | None = None) -> list[str]:
     managed = _instructions(root)
     targets = (("AGENTS.md", managed + "\n"), ("CLAUDE.md", managed + "\n"),
                (".cursor/rules/seckit.mdc", _cursor_content(root)),
-               (".agents/skills/seckit/SKILL.md", _skill(root)),
-               (".claude/skills/seckit/SKILL.md", _skill(root)),
-               (".agents/skills/seckit-audit/SKILL.md", _audit_skill(root)),
-               (".claude/skills/seckit-audit/SKILL.md", _audit_skill(root)))
+               *((relative, _named_skill(root, Path(relative).parent.name)) for relative in _SKILL_FILES))
     changed: list[str] = []
     for relative, content in targets:
         target = _safe_target(root, relative)
@@ -262,7 +300,7 @@ def install(root: Path, plan: list[dict[str, Any]] | None = None) -> list[str]:
                 updated = _cursor_update(before, root)
             else:
                 if relative.endswith("SKILL.md"):
-                    updated = _skill_update(before, root, "seckit-audit/" in relative)
+                    updated = _skill_update(before, root, Path(relative).parent.name)
                 else:
                     updated = _replace_managed(before, content.rstrip("\n"))
             if updated != before and _planned(plan, relative, "update", before, updated):
@@ -290,12 +328,13 @@ def install(root: Path, plan: list[dict[str, Any]] | None = None) -> list[str]:
     return changed
 
 _CURSOR_HEADER = "---\ndescription: SecKit security assistant for code changes\nglobs:\nalwaysApply: true\n---"
-_MANAGED_FILES = ("AGENTS.md", "CLAUDE.md", ".cursor/rules/seckit.mdc",
-                  ".agents/skills/seckit/SKILL.md", ".claude/skills/seckit/SKILL.md",
-                  ".agents/skills/seckit-audit/SKILL.md", ".claude/skills/seckit-audit/SKILL.md")
+_MANAGED_FILES = ("AGENTS.md", "CLAUDE.md", ".cursor/rules/seckit.mdc", *_SKILL_FILES)
+_MANAGED_HEADERS = (*(_skill_header(name) for name in _SKILL_NAMES), *(h for old in _PREVIOUS_HEADERS.values() for h in old),
+                    _CURSOR_HEADER)
 
 
-_OLD_FILES = tuple(_old_name(relative) for relative in _MANAGED_FILES if relative not in ("AGENTS.md", "CLAUDE.md"))
+# Guardkit shipped only the base and audit skills, with the headers of that time.
+_OLD_FILES = tuple(_old_name(relative) for relative in (".cursor/rules/seckit.mdc", *_SKILL_FILES[:4]))
 
 
 def _strip_block(root: Path, relative: str, markers: tuple[str, str], headers: tuple[str, ...],
@@ -336,7 +375,7 @@ def _strip_block(root: Path, relative: str, markers: tuple[str, str], headers: t
 
 def _strip_old_name(root: Path, relatives: tuple[str, ...], plan: list[dict[str, Any]] | None = None) -> list[str]:
     old_markers = (_OLD_BLOCK_START, _OLD_BLOCK_END)
-    old_headers = tuple(_old_name(header) for header in (_SKILL_HEADER, _AUDIT_HEADER, _CURSOR_HEADER))
+    old_headers = tuple(_old_name(header) for header in _MANAGED_HEADERS)
     return [relative for relative in relatives if _strip_block(root, relative, old_markers, old_headers, plan)]
 
 
@@ -362,8 +401,7 @@ def _migrate_old_name(root: Path, plan: list[dict[str, Any]] | None = None, skip
 def uninstall(root: Path) -> list[str]:
     """Remove only Seckit-managed blocks; delete files left with nothing else."""
     root = Path(root).resolve()
-    headers = (_SKILL_HEADER, _AUDIT_HEADER, _CURSOR_HEADER)
-    changed = [relative for relative in _MANAGED_FILES if _strip_block(root, relative, (_BLOCK_START, _BLOCK_END), headers)]
+    changed = [relative for relative in _MANAGED_FILES if _strip_block(root, relative, (_BLOCK_START, _BLOCK_END), _MANAGED_HEADERS)]
     changed += [relative for relative in _strip_old_name(root, ("AGENTS.md", "CLAUDE.md", *_OLD_FILES)) if relative not in changed]
     if unregister_mcp(root):
         changed.append(".mcp.json")

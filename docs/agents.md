@@ -8,8 +8,9 @@ not bundle an LLM or require an AI API key.
 
 `seckit init --root PROJECT` installs the project integration as part of
 initialization. It adds managed additive blocks to `AGENTS.md` and `CLAUDE.md`,
-project skills for Codex and Claude Code, and a Cursor rule with
-`alwaysApply: true`. OpenCode picks up `AGENTS.md` and both skill
+project skills for Codex and Claude Code (`seckit`, `seckit-audit` and four
+specialist skills, see [Audit tools](audit-tools.md)), and a Cursor rule with
+`alwaysApply: true`. OpenCode and Cursor pick up `AGENTS.md` and both skill
 directories. Existing custom instructions are preserved. Only an exact
 recognized old Seckit template is eligible for migration; other content is
 retained. No global agent configuration is changed. The instructions call
@@ -122,7 +123,7 @@ server named `seckit` that runs anything; `init` and `doctor` report
 descriptor, so inspect it before the client starts it. Migration renames a
 `guardkit` entry only when it runs Guardkit's MCP server (`guardkit mcp` or
 `python -m guardkit mcp`); a foreign command under that name is left alone. `seckit uninstall --root PROJECT` removes the
-managed blocks from `AGENTS.md`, `CLAUDE.md`, the Cursor rule and both skills,
+managed blocks from `AGENTS.md`, `CLAUDE.md`, the Cursor rule and the skills,
 deletes files that contain nothing else, and drops the `.mcp.json` entry; user
 content is kept. The scanner cache is never removed automatically.
 

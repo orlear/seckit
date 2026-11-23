@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from seckit import cli, provision, reviews
+from seckit import agents, cli, provision, reviews
 
 class ProvisionTests(unittest.TestCase):
     def test_download_corruption_fails_before_execute(self):
@@ -98,7 +98,7 @@ class CLITests(unittest.TestCase):
             code, out, err = self.run_cli(['init','--root',tmp])
             self.assertEqual(code,0)
             self.assertIn('Next.js',json.loads(out)['stack'])
-            self.assertEqual(set(json.loads(out)['agent_files_created']), {'AGENTS.md', 'CLAUDE.md', '.cursor/rules/seckit.mdc', '.agents/skills/seckit/SKILL.md', '.claude/skills/seckit/SKILL.md', '.agents/skills/seckit-audit/SKILL.md', '.claude/skills/seckit-audit/SKILL.md'})
+            self.assertEqual(set(json.loads(out)['agent_files_created']), {'AGENTS.md', 'CLAUDE.md', '.cursor/rules/seckit.mdc', *agents._SKILL_FILES})
             code, out, err = self.run_cli(['init','--root',tmp])
             self.assertEqual(json.loads(out)['agent_files_created'],[])
 

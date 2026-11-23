@@ -25,7 +25,7 @@ class AgentInstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             created = agents.install(root)
-            self.assertEqual(len(created), 7)
+            self.assertEqual(len(created), 3 + 2 * len(agents._SKILL_NAMES))
             for audit_skill in (root / ".agents/skills/seckit-audit/SKILL.md", root / ".claude/skills/seckit-audit/SKILL.md"):
                 text = audit_skill.read_text()
                 self.assertTrue(text.startswith("---\nname: seckit-audit\ndescription:"))
@@ -54,12 +54,73 @@ class AgentInstallTests(unittest.TestCase):
             keep.write_text("team instructions\n")
             (root / ".claude").symlink_to(external, target_is_directory=True)
             created = agents.install(root)
-            self.assertEqual(created, ["AGENTS.md", "CLAUDE.md", ".cursor/rules/seckit.mdc", ".agents/skills/seckit/SKILL.md",
-                                       ".agents/skills/seckit-audit/SKILL.md"])
+            self.assertEqual(created, ["AGENTS.md", "CLAUDE.md", ".cursor/rules/seckit.mdc",
+                                       *(f".agents/skills/{name}/SKILL.md" for name in agents._SKILL_NAMES)])
             self.assertIn("team instructions\n", keep.read_text())
             self.assertIn("<!-- seckit:managed:start -->", keep.read_text())
             self.assertFalse((external / "skills/seckit/SKILL.md").exists())
 
+
+    def test_skill_headers_are_plain_yaml_that_every_agent_accepts(self):
+        # Codex, OpenCode and Cursor parse frontmatter strictly; Cursor needs name == folder.
+        for name in agents._SKILL_NAMES:
+            lines = agents._skill_header(name).split("\n")
+            self.assertEqual(lines[0], "---")
+            self.assertEqual(lines[-1], "---")
+            self.assertEqual(lines[1], f"name: {name}")
+            self.assertRegex(name, r"^[a-z0-9]+(-[a-z0-9]+)*$")
+            self.assertTrue(lines[2].startswith("description: "))
+            description = lines[2][len("description: "):]
+            self.assertLessEqual(len(description), 1024)
+            self.assertIn("Use ", description)
+            self.assertNotIn(": ", description)
+            self.assertNotIn(" #", description)
+            self.assertNotIn(description[0], "'\"[]{}>|*&!%@`#,?:-")
+            self.assertEqual(len(lines), 4)
+        try:
+            import yaml
+        except ImportError:
+            return
+        for header in (*(agents._skill_header(name) for name in agents._SKILL_NAMES), agents._CURSOR_HEADER):
+            self.assertIsInstance(yaml.safe_load(header.strip("-\n")), dict)
+
+    def test_specialist_skills_carry_tools_and_their_playbook(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agents.install(root)
+            for name, (_description, text) in agents.playbooks.SKILLS.items():
+                for base in (".agents", ".claude"):
+                    skill = (root / base / "skills" / name / "SKILL.md").read_text()
+                    self.assertTrue(skill.startswith(f"---\nname: {name}\ndescription:"))
+                    self.assertIn("-I -m seckit surface`", skill)
+                    self.assertIn(text.strip().splitlines()[0], skill)
+                    self.assertLess(len(skill.splitlines()), 500)
+            self.assertIn("seckit-secret-leak", (root / "AGENTS.md").read_text())
+
+    def test_header_from_an_earlier_release_is_upgraded_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agents.install(root)
+            skill = root / ".claude/skills/seckit-audit/SKILL.md"
+            current = skill.read_text()
+            old_header = agents._PREVIOUS_HEADERS["seckit-audit"][0]
+            skill.write_bytes(current.replace(agents._AUDIT_HEADER, old_header).replace("\n", "\r\n").encode())
+            self.assertEqual(agents.install(root), [".claude/skills/seckit-audit/SKILL.md"])
+            data = skill.read_bytes()
+            self.assertTrue(data.startswith((agents._AUDIT_HEADER + "\n").replace("\n", "\r\n").encode()))
+            self.assertNotIn(b"with SecKit: map", data)
+            self.assertEqual(data.replace(b"\r\n", b"\n").decode(), current)
+            self.assertEqual(agents.install(root), [])
+
+    def test_uninstall_removes_skills_with_an_earlier_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agents.install(root)
+            skill = root / ".agents/skills/seckit/SKILL.md"
+            skill.write_text(skill.read_text().replace(agents._SKILL_HEADER, agents._PREVIOUS_HEADERS["seckit"][0]))
+            agents.uninstall(root)
+            self.assertFalse((root / ".agents").exists())
+            self.assertFalse((root / ".claude").exists())
 
     def test_generated_invocation_runs_with_cli_option_order(self):
         with tempfile.TemporaryDirectory() as tmp:
