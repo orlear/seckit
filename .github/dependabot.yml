@@ -1,0 +1,15 @@
+# GitHub Actions are pinned by commit SHA (required by the repository); Dependabot
+# proposes new SHAs with the version comment. Python release tooling is locked by
+# scripts/lock_build.py with hashes, so it is not managed here.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Skip releases younger than a week: compromised versions are usually caught by then.
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
