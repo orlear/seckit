@@ -9,10 +9,24 @@ and the tools of the [Semgrep MCP server](https://github.com/semgrep/mcp)
 (custom-rule scans). The implementation is original, offline and stdlib-only;
 nothing executes project code.
 
-`seckit init` installs a second skill, `seckit-audit`, into
-`.claude/skills/` and `.agents/skills/`. It contains the audit methodology and
-the exact commands for this machine. The same methodology is served as MCP
-prompts.
+`seckit init` installs skills into `.claude/skills/` and `.agents/skills/`,
+the folders Claude Code, Codex, Cursor and OpenCode read. Each holds the
+exact commands for this machine and one methodology; the same methodologies
+are served as MCP prompts. Agents load a skill on their own when the task
+matches its description, so each description says what the skill does and
+then "Use when" with the words people type.
+
+| Skill | Loads for | MCP prompt |
+|---|---|---|
+| `seckit` | scanning the project, safe fixes, changes to dependencies, auth or config | |
+| `seckit-audit` | full audits, PR and diff reviews, triage, variants | `security_audit`, `differential_review`, `variant_analysis`, `triage_findings` |
+| `seckit-access-control` | authentication and authorization: route matrix, IDOR/BOLA, function and property level, tenants, JWT, sessions, SSRF | `access_control_review` |
+| `seckit-agent-security` | LLM features and agent configuration in the repository: prompt injection to tools, output handling, MCP, hooks, permissions | `agent_security_review` |
+| `seckit-secret-leak` | a confirmed or reported leaked credential: classify, rotate first, fix, clean copies on request | `secret_leak_response` |
+| `seckit-iac-review` | Terraform, CloudFormation, Kubernetes, Helm, Dockerfiles, compose, cloud IAM | `iac_review` |
+
+`init` also replaces a skill header written by an earlier Seckit release, so
+description updates reach existing projects; a header you edited is kept.
 
 ## Commands and MCP tools
 
@@ -29,7 +43,8 @@ prompts.
 | `report --format markdown\|sarif\|json [--output F]` | `audit_report` | Scan + supply-chain findings with triage verdicts; Markdown adds an attack-surface summary, SARIF 2.1.0 suits GitHub code scanning |
 
 MCP prompts: `security_audit`, `differential_review`, `variant_analysis`,
-`triage_findings`.
+`triage_findings`, `access_control_review`, `agent_security_review`,
+`secret_leak_response`, `iac_review`.
 
 Exit codes match `scan`: 0 nothing found, 1 findings (for `diff`: new risky
 lines, removed controls or findings in changed files), 2 incomplete or usage
