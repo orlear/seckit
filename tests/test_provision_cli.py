@@ -325,6 +325,67 @@ class SemgrepPythonCoverageTests(unittest.TestCase):
         self.assertLess(message.count('noise'), 15)
 
 
+class SemgrepInstallCompletionTests(unittest.TestCase):
+    def install(self, base, omitted, check=None):
+        """Run _semgrep with every external step stubbed; returns the pip install commands."""
+        commands = []
+        def checked(command):
+            commands.append(command)
+            bindir = base / f'semgrep-{provision.SEMGREP}' / ('Scripts' if os.name == 'nt' else 'bin')
+            bindir.mkdir(parents=True, exist_ok=True)
+            (bindir / ('semgrep.exe' if os.name == 'nt' else 'semgrep')).write_text('scanner')
+            return ''
+        with patch.object(provision, 'lock_header', return_value=([provision._current_python()], omitted)), \
+             patch.object(provision, '_current_python', return_value=provision._current_python()), \
+             patch.object(provision.sys.implementation, 'name', 'cpython'), \
+             patch.object(provision.venv, 'EnvBuilder') as builder, \
+             patch.object(provision, '_ensure_pip'), \
+             patch.object(provision, '_checked', side_effect=checked), \
+             patch.object(provision, '_check_dependencies', side_effect=check), \
+             patch.object(provision, 'compatible', return_value=True):
+            try:
+                provision._semgrep(base)
+            finally:
+                self.builder_calls = builder.call_args_list
+        return commands
+
+    def marker(self, base):
+        return base / f'semgrep-{provision.SEMGREP}' / 'verified-requirements.txt'
+
+    def test_failed_dependency_check_is_not_reused_on_next_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            def broken(python, omitted):
+                raise provision.ProvisionError('Installed Semgrep dependencies are inconsistent')
+            with self.assertRaises(provision.ProvisionError):
+                self.install(base, {}, check=broken)
+            self.assertFalse(self.marker(base).exists())
+            # The executable is present and "compatible", yet the next run must reinstall.
+            self.assertEqual(len(self.install(base, {})), 1)
+            self.assertEqual(self.marker(base).read_bytes(), provision.semgrep_lock().read_bytes())
+            self.assertTrue(all(call.kwargs.get('clear') for call in self.builder_calls))
+
+    def test_marker_from_a_different_lock_forces_reinstall(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self.install(base, {})
+            self.marker(base).write_text('older lock\n')
+            self.assertEqual(len(self.install(base, {})), 1)
+
+    def test_completed_install_is_reused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            self.install(base, {})
+            self.assertEqual(self.install(base, {}), [])
+
+    def test_no_deps_only_where_the_lock_declares_omissions(self):
+        current = provision._current_python()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertNotIn('--no-deps', self.install(Path(tmp), {})[0])
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIn('--no-deps', self.install(Path(tmp), {current: {'ruamel-yaml-clib'}})[0])
+
+
 class WheelTrustTests(unittest.TestCase):
     def test_semgrep_pip_commands_ignore_repo_local_module(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -373,8 +434,10 @@ class WheelTrustTests(unittest.TestCase):
             self.assertTrue(all(command[1] == '-I' for command in commands))
             self.assertIn('verified-pip.txt', commands[0][-1])
             install = commands[1]
-            for flag in ('--require-hashes', '--only-binary=:all:', '--no-deps'):
+            for flag in ('--require-hashes', '--only-binary=:all:'):
                 self.assertIn(flag, install)
+            _, omitted = provision.lock_header()
+            self.assertEqual('--no-deps' in install, bool(omitted.get(provision._current_python())))
             self.assertNotIn('download', install)
             self.assertEqual(Path(install[-1]).name, f'semgrep-{provision.SEMGREP}.txt')
             self.assertFalse(marker.exists())
@@ -432,6 +495,7 @@ class WheelTrustTests(unittest.TestCase):
             bindir.mkdir(parents=True)
             executable=bindir/('semgrep.exe' if os.name=='nt' else 'semgrep')
             executable.write_text('existing compatible scanner')
+            (bindir.parent/'verified-requirements.txt').write_bytes(provision.semgrep_lock().read_bytes())
             with patch.object(provision,'compatible',return_value=True), \
                  patch.object(provision,'PIP_SHA256',hashlib.sha256(pip_bytes).hexdigest()), \
                  patch.object(provision,'_pip_version',side_effect=['26.0.1',provision.PIP]), \

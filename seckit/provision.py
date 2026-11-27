@@ -249,12 +249,15 @@ def _semgrep(base: Path) -> str:
     bindir = folder / ("Scripts" if os.name == "nt" else "bin")
     executable = bindir / ("semgrep.exe" if os.name == "nt" else "semgrep")
     python = str(bindir / ("python.exe" if os.name == "nt" else "python"))
-    if executable.exists() and compatible(str(executable), SEMGREP):
-        _ensure_pip(python, base)
-        return str(executable)
     lock = semgrep_lock()
     if not lock.is_file():
         raise ProvisionError("Seckit is missing the dependency lock for the pinned Semgrep version")
+    # The marker is written only after every check passed, so an interrupted or failed install
+    # (for example one rejected by `pip check`) is rebuilt instead of reused.
+    marker = folder / "verified-requirements.txt"
+    if _verified(marker, lock) and executable.exists() and compatible(str(executable), SEMGREP):
+        _ensure_pip(python, base)
+        return str(executable)
     pythons, omitted = lock_header(lock)
     current = _current_python()
     if sys.implementation.name != "cpython" or current not in pythons:
@@ -264,23 +267,37 @@ def _semgrep(base: Path) -> str:
                              "(for example: pipx reinstall --python python3.14 seckit).")
     _note(f"installing Semgrep {SEMGREP} into the scanner cache (first run only)")
     try:
-        venv.EnvBuilder(with_pip=True).create(folder)
+        marker.unlink(missing_ok=True)
+        # clear: nothing left over from an earlier failed attempt survives into this install.
+        venv.EnvBuilder(with_pip=True, clear=True).create(folder)
     except (OSError, subprocess.SubprocessError) as exc:
         raise ProvisionError("Python venv/pip support is unavailable; use a full user-space Python installation.") from exc
     _ensure_pip(python, base)
     # Install only wheels (no source builds) whose sha256 is in the lock shipped with Seckit,
-    # so a newly published or tampered dependency release cannot be installed. The lock is the
-    # complete resolved tree, so pip does not resolve further (--no-deps): Semgrep pins
-    # ruamel.yaml.clib, which has no wheel for every Python the lock covers. `pip check` then
-    # allows only the omissions the lock declares.
+    # so a newly published or tampered dependency release cannot be installed. pip's resolver
+    # also proves the lock is a complete tree (a dependency without a hash is rejected). Only
+    # where the lock declares an omission (Semgrep pins ruamel.yaml.clib, which has no wheel for
+    # that Python) is resolution skipped with --no-deps; `pip check` then allows exactly the
+    # declared omissions, and runs everywhere as a second check.
+    skipped = omitted.get(current, set())
     _checked([python, "-I", "-m", "pip", "--isolated", "--disable-pip-version-check", "install",
-              "--index-url", "https://pypi.org/simple", "--only-binary=:all:", "--no-deps",
-              "--require-hashes", "-r", str(lock)])
-    _check_dependencies(python, omitted.get(current, set()))
-    folder.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(lock, folder / "verified-requirements.txt")
+              "--index-url", "https://pypi.org/simple", "--only-binary=:all:",
+              *(["--no-deps"] if skipped else []), "--require-hashes", "-r", str(lock)])
+    _check_dependencies(python, skipped)
     if not compatible(str(executable), SEMGREP): raise ProvisionError("Installed Semgrep did not pass version check")
+    folder.mkdir(parents=True, exist_ok=True)
+    temporary = marker.with_suffix(".tmp")
+    shutil.copyfile(lock, temporary)
+    temporary.replace(marker)
     return str(executable)
+
+
+def _verified(marker: Path, lock: Path) -> bool:
+    """The cached environment finished installing from exactly this lock."""
+    try:
+        return marker.is_file() and marker.read_bytes() == lock.read_bytes()
+    except OSError:
+        return False
 
 def _locked_install(base: Path, name: str, installer) -> str:
     """Serialize installers for the same cache, including across CLI processes."""
