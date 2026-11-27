@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import io
 import json
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -251,6 +252,79 @@ class ApprovalVerificationTests(unittest.TestCase):
             with self.assertRaises(ValueError): fixes.apply(root,plans)
             self.assertEqual(outside.read_text(),'USER root\n')
 
+class SemgrepPythonCoverageTests(unittest.TestCase):
+    def lock(self, text):
+        tmp = tempfile.TemporaryDirectory(); self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / 'lock.txt'; path.write_text(text)
+        return path
+
+    def test_shipped_lock_declares_its_pythons_and_omissions(self):
+        pythons, omitted = provision.lock_header()
+        self.assertIn('3.15', pythons)
+        self.assertEqual(omitted.get('3.15'), {'ruamel-yaml-clib'})
+        text = provision.semgrep_lock().read_text()
+        used = set(re.findall(r'python_version == "(3\.\d+)"', text))
+        self.assertLessEqual(used, set(pythons))
+
+    def test_lock_omits_only_declared_packages(self):
+        # Every package the lock leaves out on a Python must be declared as omitted there.
+        _, omitted = provision.lock_header()
+        text = provision.semgrep_lock().read_text().replace('\\\n', ' ')
+        clib = [l for l in text.splitlines() if l.startswith('ruamel-yaml-clib==')]
+        self.assertEqual(len(clib), 1)
+        self.assertNotIn('"3.15"', clib[0])
+
+    def test_header_parsing_stops_at_first_requirement(self):
+        path = self.lock('# pythons: 3.12 3.13\n# omitted: 3.13 a-b\nx==1 --hash=sha256:' + '0' * 64 + '\n# pythons: 9.9\n')
+        self.assertEqual(provision.lock_header(path), (['3.12', '3.13'], {'3.13': {'a-b'}}))
+
+    def test_python_outside_lock_fails_before_any_download(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(provision, 'lock_header', return_value=(['3.10'], {})), \
+             patch.object(provision, '_current_python', return_value='3.16'), \
+             patch.object(provision.venv, 'EnvBuilder') as builder, \
+             patch.object(provision, 'fetch') as fetch, patch.object(provision, '_checked') as execute:
+            with self.assertRaisesRegex(provision.ProvisionError, 'locked for CPython 3.10; this is .* 3.16'):
+                provision._semgrep(Path(tmp))
+        builder.assert_not_called(); fetch.assert_not_called(); execute.assert_not_called()
+
+    def pip_check(self, stdout, code=1):
+        result = subprocess.CompletedProcess([], code, stdout.encode(), b'')
+        return patch.object(provision.subprocess, 'run', return_value=result)
+
+    def test_pip_check_allows_only_declared_omission(self):
+        with self.pip_check('semgrep 1.182.0 requires ruamel-yaml-clib, which is not installed.\n'):
+            provision._check_dependencies('py', {'ruamel-yaml-clib'})
+        with self.pip_check('semgrep 1.182.0 requires ruamel.yaml.clib, which is not installed.\n'):
+            provision._check_dependencies('py', {'ruamel-yaml-clib'})
+
+    def test_pip_check_rejects_other_missing_or_conflicting_packages(self):
+        for out in ('semgrep 1.182.0 requires rich, which is not installed.\n',
+                    'semgrep 1.182.0 has requirement click~=8.4.2, but you have click 9.0.\n'):
+            with self.subTest(out=out), self.pip_check(out):
+                with self.assertRaisesRegex(provision.ProvisionError, 'inconsistent'):
+                    provision._check_dependencies('py', {'ruamel-yaml-clib'})
+        with self.pip_check('semgrep 1.182.0 requires ruamel-yaml-clib, which is not installed.\n'):
+            with self.assertRaises(provision.ProvisionError):
+                provision._check_dependencies('py', set())
+        with self.pip_check('', code=1):
+            with self.assertRaises(provision.ProvisionError):
+                provision._check_dependencies('py', set())
+        with self.pip_check('No broken requirements found.\n', code=0):
+            provision._check_dependencies('py', set())
+
+    def test_pip_failure_reports_sanitized_tail(self):
+        err = b'noise\n' * 30 + b'ERROR: No matching distribution found for x==1\x1b]0;evil\x07\xe2\x80\xae\n'
+        with patch.object(provision.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, b'', err)):
+            with self.assertRaises(provision.ProvisionError) as caught:
+                provision._checked(['pip'])
+        message = str(caught.exception)
+        self.assertIn('No matching distribution found for x==1', message)
+        for bad in ('\x1b', '\x07', '\u202e'):
+            self.assertNotIn(bad, message)
+        self.assertLess(message.count('noise'), 15)
+
+
 class WheelTrustTests(unittest.TestCase):
     def test_semgrep_pip_commands_ignore_repo_local_module(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -299,7 +373,7 @@ class WheelTrustTests(unittest.TestCase):
             self.assertTrue(all(command[1] == '-I' for command in commands))
             self.assertIn('verified-pip.txt', commands[0][-1])
             install = commands[1]
-            for flag in ('--require-hashes', '--only-binary=:all:'):
+            for flag in ('--require-hashes', '--only-binary=:all:', '--no-deps'):
                 self.assertIn(flag, install)
             self.assertNotIn('download', install)
             self.assertEqual(Path(install[-1]).name, f'semgrep-{provision.SEMGREP}.txt')

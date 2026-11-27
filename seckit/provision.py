@@ -130,13 +130,73 @@ def _trivy(base: Path) -> str:
     if not compatible(str(dest), TRIVY): raise ProvisionError("Installed Trivy did not pass version check")
     return str(dest)
 
-def _checked(command: list[str]) -> None:
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _tail(output: bytes, lines: int = 12, limit: int = 2000) -> str:
+    """Last lines of installer output, without terminal control or bidi characters."""
+    text = _CONTROL.sub("", output.decode("utf-8", "replace"))
+    return "\n".join(text.strip().splitlines()[-lines:])[-limit:]
+
+
+def _checked(command: list[str]) -> str:
     try:
         proc = subprocess.run(command, capture_output=True, timeout=600)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ProvisionError("Scanner installation could not complete") from exc
     if proc.returncode:
-        raise ProvisionError("Semgrep installation failed. Python 3.10–3.14 with binary wheels and network access is recommended; run seckit doctor.")
+        detail = _tail(proc.stderr) or _tail(proc.stdout)
+        raise ProvisionError("Semgrep installation failed. A Python covered by the Semgrep lock, binary wheels "
+                             "and network access are required; run seckit doctor."
+                             + (f"\npip output:\n{detail}" if detail else ""))
+    return proc.stdout.decode("utf-8", "replace")
+
+
+def semgrep_lock() -> Path:
+    return Path(__file__).with_name("locks") / f"semgrep-{SEMGREP}.txt"
+
+
+def lock_header(lock: Path | None = None) -> tuple[list[str], dict[str, set[str]]]:
+    """Pythons the lock was resolved for, and packages it deliberately leaves out per Python
+    (Semgrep requires them but they publish no wheel there and have a pure-Python fallback)."""
+    pythons: list[str] = []
+    omitted: dict[str, set[str]] = {}
+    try:
+        text = (lock or semgrep_lock()).read_text()
+    except OSError:
+        return pythons, omitted
+    for line in text.splitlines():
+        if not line.startswith("#"):
+            break
+        words = line[1:].split()
+        if words[:1] == ["pythons:"]:
+            pythons = words[1:]
+        elif words[:1] == ["omitted:"] and len(words) >= 3:
+            omitted.setdefault(words[1], set()).update(words[2:])
+    return pythons, omitted
+
+
+def _current_python() -> str:
+    return "%d.%d" % sys.version_info[:2]
+
+
+def _check_dependencies(python: str, omitted: set[str]) -> None:
+    """`pip check` after a --no-deps install: only the lock's declared omissions may be missing."""
+    try:
+        proc = subprocess.run([python, "-I", "-m", "pip", "--isolated", "--disable-pip-version-check", "check"],
+                              capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ProvisionError("Semgrep dependency check could not complete") from exc
+    problems, allowed = [], False
+    for line in _tail(proc.stdout, lines=200, limit=20000).splitlines():
+        line = line.strip()
+        match = re.fullmatch(r"\S+ \S+ requires ([A-Za-z0-9_.-]+), which is not installed\.", line)
+        if match and re.sub(r"[-_.]+", "-", match.group(1)).lower() in omitted:
+            allowed = True
+        elif line and line != "No broken requirements found.":
+            problems.append(line)
+    if problems or (proc.returncode and not allowed):
+        raise ProvisionError("Installed Semgrep dependencies are inconsistent:\n" + "\n".join(problems[-12:]))
 
 def _pip_version(python: str) -> str | None:
     """Read the venv pip version without allowing the project cwd to shadow it."""
@@ -192,6 +252,16 @@ def _semgrep(base: Path) -> str:
     if executable.exists() and compatible(str(executable), SEMGREP):
         _ensure_pip(python, base)
         return str(executable)
+    lock = semgrep_lock()
+    if not lock.is_file():
+        raise ProvisionError("Seckit is missing the dependency lock for the pinned Semgrep version")
+    pythons, omitted = lock_header(lock)
+    current = _current_python()
+    if sys.implementation.name != "cpython" or current not in pythons:
+        supported = ", ".join(pythons) or "none"
+        raise ProvisionError(f"Semgrep {SEMGREP} is locked for CPython {supported}; this is "
+                             f"{sys.implementation.name} {current}. Reinstall Seckit with a covered Python "
+                             "(for example: pipx reinstall --python python3.14 seckit).")
     _note(f"installing Semgrep {SEMGREP} into the scanner cache (first run only)")
     try:
         venv.EnvBuilder(with_pip=True).create(folder)
@@ -199,13 +269,14 @@ def _semgrep(base: Path) -> str:
         raise ProvisionError("Python venv/pip support is unavailable; use a full user-space Python installation.") from exc
     _ensure_pip(python, base)
     # Install only wheels (no source builds) whose sha256 is in the lock shipped with Seckit,
-    # so a newly published or tampered dependency release cannot be installed.
-    lock = Path(__file__).with_name("locks") / f"semgrep-{SEMGREP}.txt"
-    if not lock.is_file():
-        raise ProvisionError("Seckit is missing the dependency lock for the pinned Semgrep version")
+    # so a newly published or tampered dependency release cannot be installed. The lock is the
+    # complete resolved tree, so pip does not resolve further (--no-deps): Semgrep pins
+    # ruamel.yaml.clib, which has no wheel for every Python the lock covers. `pip check` then
+    # allows only the omissions the lock declares.
     _checked([python, "-I", "-m", "pip", "--isolated", "--disable-pip-version-check", "install",
-              "--index-url", "https://pypi.org/simple", "--only-binary=:all:",
+              "--index-url", "https://pypi.org/simple", "--only-binary=:all:", "--no-deps",
               "--require-hashes", "-r", str(lock)])
+    _check_dependencies(python, omitted.get(current, set()))
     folder.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(lock, folder / "verified-requirements.txt")
     if not compatible(str(executable), SEMGREP): raise ProvisionError("Installed Semgrep did not pass version check")

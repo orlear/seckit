@@ -163,6 +163,7 @@ def _run(command: list[str], cwd: Path, timeout: int = 600,
     if env is None:
         with sandbox.no_network() as proxy:
             return _run(command, cwd, timeout, sandbox.environment(cwd, proxy))
+    sandbox.bound_stack()
     try:
         proc = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False, env=env)
     except FileNotFoundError:

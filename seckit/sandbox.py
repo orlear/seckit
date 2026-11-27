@@ -74,6 +74,32 @@ def environment(root: Path | None, offline_proxy: str | None, path: str | None =
     return env
 
 
+# Semgrep sets semgrep-core's soft stack limit to a third of the hard limit. Python 3.15 made
+# resource.RLIM_INFINITY positive (2**64-1), so with an unlimited hard limit that becomes a
+# ~6 EB finite limit and semgrep-core segfaults; on earlier Pythons -1 // 3 stayed unlimited.
+# Capping the hard limit makes Semgrep's choice a usable 1 GiB.
+STACK_HARD_LIMIT = 3 * 1024 ** 3
+
+
+def bound_stack() -> None:
+    """Cap this process's (and so every scanner's) hard stack limit if it is unlimited.
+
+    Done in the parent rather than in a preexec_fn, which is unsafe with threads. Lowering a
+    hard limit cannot be undone, which is harmless for Seckit itself."""
+    try:
+        import resource
+    except ImportError:  # Windows
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+        if hard == resource.RLIM_INFINITY or hard > STACK_HARD_LIMIT:
+            if soft == resource.RLIM_INFINITY or soft > STACK_HARD_LIMIT:
+                soft = STACK_HARD_LIMIT
+            resource.setrlimit(resource.RLIMIT_STACK, (soft, STACK_HARD_LIMIT))
+    except (OSError, ValueError):
+        pass
+
+
 _ISOLATION: list[str] | None = None
 
 

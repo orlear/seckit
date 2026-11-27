@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -308,3 +309,46 @@ class AgentIntegrationTests(Project):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StackLimitTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX rlimits")
+    def test_unlimited_hard_stack_is_capped_for_scanners(self):
+        import resource
+        calls = []
+        with patch.object(resource, "getrlimit", return_value=(8 * 1024 * 1024, resource.RLIM_INFINITY)), \
+             patch.object(resource, "setrlimit", side_effect=lambda kind, value: calls.append(value)):
+            sandbox.bound_stack()
+        self.assertEqual(calls, [(8 * 1024 * 1024, sandbox.STACK_HARD_LIMIT)])
+        # Semgrep picks hard // 3 for semgrep-core: a finite, usable size.
+        self.assertEqual(sandbox.STACK_HARD_LIMIT // 3, 1024 ** 3)
+
+    @unittest.skipIf(os.name == "nt", "POSIX rlimits")
+    def test_unlimited_soft_stack_is_capped_too_and_small_limits_are_kept(self):
+        import resource
+        calls = []
+        with patch.object(resource, "getrlimit", return_value=(resource.RLIM_INFINITY, resource.RLIM_INFINITY)), \
+             patch.object(resource, "setrlimit", side_effect=lambda kind, value: calls.append(value)):
+            sandbox.bound_stack()
+        self.assertEqual(calls, [(sandbox.STACK_HARD_LIMIT, sandbox.STACK_HARD_LIMIT)])
+        with patch.object(resource, "getrlimit", return_value=(8 * 1024 * 1024, 64 * 1024 * 1024)), \
+             patch.object(resource, "setrlimit") as setrlimit:
+            sandbox.bound_stack()
+        setrlimit.assert_not_called()
+
+    @unittest.skipIf(os.name == "nt", "POSIX rlimits")
+    def test_scanner_child_inherits_bounded_stack(self):
+        code = ("import resource, subprocess, sys; from seckit import sandbox; sandbox.bound_stack(); "
+                "print(subprocess.run(['sh', '-c', 'ulimit -H -s'], capture_output=True, text=True).stdout.strip())")
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                             cwd=Path(__file__).resolve().parent.parent, check=True).stdout.strip()
+        self.assertNotEqual(out, "unlimited")
+        self.assertLessEqual(int(out) * 1024, sandbox.STACK_HARD_LIMIT)
+
+    def test_scanner_runs_bound_the_stack_first(self):
+        order = []
+        with patch.object(sandbox, "bound_stack", side_effect=lambda: order.append("bound")), \
+             patch.object(scanning.subprocess, "run", side_effect=lambda *a, **k: order.append("run") or
+                          subprocess.CompletedProcess([], 0, "{}", "")):
+            scanning._run(["semgrep"], Path("."), env={})
+        self.assertEqual(order, ["bound", "run"])
